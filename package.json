@@ -1,0 +1,17 @@
+{
+    "name": "sqlite.js",
+    "description": "Pure JavaScript implementation of SQLite 3 with typed arrays",
+    "version": "0.0.0",
+    "author": "Konstantin Käfer <github@kkaefer.com>",
+    "main": "./lib/sqlite.js",
+    "engines": {
+        "node": ">= 0.6"
+    },
+    "licenses": [{ "type": "BSD" }],
+    "devDependencies": {
+        "mocha": ">= 0.12"
+    },
+    "scripts": {
+        "test": "mocha -R spec"
+    }
+}
