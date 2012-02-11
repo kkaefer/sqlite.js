@@ -15,6 +15,18 @@ describe('reading a file', function() {
         });
     });
 
+    it('should read a table', function(done) {
+        var db = new sqlite.Database('./test/fixtures/empty.sqlite');
+        db.on('error', done);
+        db.on('open', function() {
+            db.readTable('foo', function(err, rows) {
+                if (err) return done(err);
+                assert.deepEqual(rows, [ [ 1, 1, 2, 'bar' ] ]);
+                done();
+            });
+        });
+    });
+
     it('should read the table schema from a database with >1 schema pages', function(done) {
         var db = new sqlite.Database('./test/fixtures/lotsoftables.sqlite');
         db.on('error', done);
