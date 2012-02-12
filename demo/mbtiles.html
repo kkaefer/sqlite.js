@@ -1,0 +1,149 @@
+<script src="http://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js"></script>
+<script src="sqlite.js"></script>
+<script>
+// From jonleighton via https://gist.github.com/958841
+function arrayBufferDataUri(bytes, mime) {
+    var base64 = ''
+    var encodings = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+
+    var byteLength = bytes.byteLength
+    var byteRemainder = byteLength % 3
+    var mainLength = byteLength - byteRemainder
+
+    var a, b, c, d
+    var chunk
+
+    // Main loop deals with bytes in chunks of 3
+    for (var i = 0; i < mainLength; i = i + 3) {
+        // Combine the three bytes into a single integer
+        chunk = (bytes[i] << 16) | (bytes[i + 1] << 8) | bytes[i + 2]
+
+        // Use bitmasks to extract 6-bit segments from the triplet
+        a = (chunk & 16515072) >> 18 // 16515072 = (2^6 - 1) << 18
+        b = (chunk & 258048) >> 12 // 258048   = (2^6 - 1) << 12
+        c = (chunk & 4032) >> 6 // 4032     = (2^6 - 1) << 6
+        d = chunk & 63 // 63       = 2^6 - 1
+        // Convert the raw binary segments to the appropriate ASCII encoding
+        base64 += encodings[a] + encodings[b] + encodings[c] + encodings[d]
+    }
+
+    // Deal with the remaining bytes and padding
+    if (byteRemainder == 1) {
+        chunk = bytes[mainLength]
+
+        a = (chunk & 252) >> 2 // 252 = (2^6 - 1) << 2
+        // Set the 4 least significant bits to zero
+        b = (chunk & 3) << 4 // 3   = 2^2 - 1
+        base64 += encodings[a] + encodings[b] + '=='
+    } else if (byteRemainder == 2) {
+        chunk = (bytes[mainLength] << 8) | bytes[mainLength + 1]
+
+        a = (chunk & 16128) >> 8 // 16128 = (2^6 - 1) << 8
+        b = (chunk & 1008) >> 4 // 1008  = (2^6 - 1) << 4
+        // Set the 2 least significant bits to zero
+        c = (chunk & 15) << 2 // 15    = 2^4 - 1
+        base64 += encodings[a] + encodings[b] + encodings[c] + '='
+    }
+
+    return "data:" + mime + ";base64," + base64
+}
+
+</script>
+<script>
+
+function parseMetadata(rows) {
+    var info = {};
+    for (var i = 0; i < rows.length; i++) {
+        info[rows[i][1]] = rows[i][2];
+    }
+
+    info.minzoom = 'minzoom' in info ? parseInt(info.minzoom, 10) : 0;
+    info.maxzoom = 'maxzoom' in info ? parseInt(info.maxzoom, 10) : 11;
+    if (info.bounds) info.bounds = info.bounds.split(',').map(parseFloat);
+    if (info.center) info.center = info.center.split(',').map(parseFloat);
+
+    var range = info.maxzoom - info.minzoom;
+    if (!info.center && info.bounds) info.center = [
+        (info.bounds[2] - info.bounds[0]) / 2 + info.bounds[0],
+        (info.bounds[3] - info.bounds[1]) / 2 + info.bounds[1],
+        (range <= 1) ? info.maxzoom : Math.floor(range * 0.5) + info.minzoom
+    ];
+
+    return info;
+}
+
+function buildMetadataTable(info) {
+    var metadata = $('#metadata').empty();
+    metadata.append($('<h3>').text(info.name));
+    var list = $('<ul>');
+    if (info.description) list.append($('<li>').text('Description: ' + info.description));
+    if (info.version) list.append($('<li>').text('Version: ' + info.version));
+    if (info.bounds) list.append($('<li>').text('Bounds: ' + info.bounds.join(', ')));
+    if (info.center) list.append($('<li>').text('Center: ' + info.center.join(', ')));
+    if ('minzoom' in info) list.append($('<li>').text('Minimum zoom: ' + info.minzoom));
+    if ('maxzoom' in info) list.append($('<li>').text('Maximum zoom: ' + info.maxzoom));
+    metadata.append(list);
+}
+
+function MBTiles(db) {
+    this.db = db;
+}
+
+// Query plan for retrieving tiles.
+MBTiles.getTile = [
+    { "type": "index", "name": "map_index" },
+    { "type": "table", "name": "map", select: [4] },
+    { "type": "index", "name": "images_id" },
+    { "type": "table", "name": "images", select: [1] }
+];
+
+MBTiles.prototype.getTile = function(z, x, y, callback) {
+    // Flip Y coordinate because MBTiles files are TMS.
+    y = (1 << z) - 1 - y;
+    this.db.execute(MBTiles.getTile, [z, x, y], function(err, result) {
+        if (err) return callback(err);
+        return callback(null, result[0]);
+    });
+};
+
+$(function() {
+    var sm = new SphericalMercator;
+    var input = $('#file')[0];
+    input.onchange = function() {
+        var file = input.files[0];
+
+        var db = new SQLite.Database(file);
+        db.on('error', function(err) {
+            alert(err.message);
+            console.warn(err.stack);
+        });
+        db.on('open', function() {
+            if (!db.tables['metadata']) return alert('Can\'t find metadata table');
+            db.readTable('metadata', function(err, rows) {
+                if (err) return alert(err.message);
+                var info = parseMetadata(rows);
+                buildMetadataTable(info);
+
+                if (info.center) {
+                    var mbtiles = new MBTiles(db);
+                    var c = info.center;
+                    var xyz = sm.xyz([ c[0], c[1], c[0], c[1] ], c[2], false);
+                    mbtiles.getTile(c[2], xyz.minX, xyz.minY, function(err, result) {
+                        if (err) throw err;
+                        $('#image')[0].src = arrayBufferDataUri(result, 'image/png');
+                    });
+                }
+            });
+        });
+    };
+});
+
+</script>
+
+<form>
+    Select an MBTiles file: <input type="file" id="file">
+</form>
+
+<img id="image">
+<div id="metadata">
+</div>
