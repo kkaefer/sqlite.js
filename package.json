@@ -8,6 +8,9 @@
         "node": ">= 0.6"
     },
     "licenses": [{ "type": "BSD" }],
+    "dependencies": {
+        "eventemitter": "~0.3.3"
+    },
     "devDependencies": {
         "mocha": ">= 0.12"
     },
