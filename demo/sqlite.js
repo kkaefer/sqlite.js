@@ -328,9 +328,21 @@ var IO = exports;
 if (typeof process !== 'undefined' && typeof process.title !== 'undefined') {
     // node.js
     var fs = require('fs');
+    var path = require('path');
 
     IO.open = function(file, callback) {
         fs.open(file, 'r', callback);
+    };
+
+    IO.stat = function(file, callback) {
+        fs.stat(file, function(err, stat) {
+            if (err) return callback(err);
+            callback(null, {
+                name: path.basename(file),
+                size: stat.size,
+                modified: stat.mtime
+            });
+        });
     };
 
     IO.read = function(fd, offset, length, callback) {
@@ -348,6 +360,14 @@ if (typeof process !== 'undefined' && typeof process.title !== 'undefined') {
     // Browser
     IO.open = function(file, callback) {
         callback(null, file);
+    };
+
+    IO.stat = function(file, callback) {
+        callback(null, {
+            name: file.fileName,
+            size: file.fileSize,
+            modified: file.lastModifiedDate
+        });
     };
 
     var slice = File.prototype.slice || File.prototype.webkitSlice || File.prototype.mozSlice;
@@ -389,6 +409,13 @@ function nonEnumerable(obj, prop, value) {
     Object.defineProperty(obj, prop, {
         enumerable: false,
         value: value
+    });
+}
+
+function makeEventEmitter(child) {
+    var EE = typeof EventEmitter !== 'undefined' ? EventEmitter : process.EventEmitter;
+    child.prototype = Object.create(EE.prototype, {
+        constructor: { value: child, enumerable: false, writable: true, configurable: true }
     });
 }
 
@@ -494,22 +521,33 @@ Cell.prototype.getRecord = function(callback) {
 
 
 Page.Overflow = OverflowPage;
-function OverflowPage(buffer, no, db) {
+function OverflowPage(no, db) {
+    this.no = no;
+    nonEnumerable(this, 'db', db);
+}
+makeEventEmitter(OverflowPage);
+
+OverflowPage.prototype.setBuffer = function(buffer) {
     var data = new DataView(buffer, 0, 4);
-    this.size = buffer.byteLength - db.reservedSpace - 4;
+    this.size = buffer.byteLength - this.db.reservedSpace - 4;
     this.right = data.getUint32(0);
     nonEnumerable(this, '_bytes', new Uint8Array(buffer, 4, this.size));
 }
 
 
 Page.BTree = BTreePage;
-function BTreePage(buffer, no, db) {
-    var data = new DataView(buffer);
-    this.size = buffer.byteLength - db.reservedSpace;
+function BTreePage(no, db) {
     this.no = no;
+    nonEnumerable(this, 'db', db);
+}
+makeEventEmitter(BTreePage);
+
+BTreePage.prototype.setBuffer = function(buffer) {
+    var data = new DataView(buffer);
+    this.size = buffer.byteLength - this.db.reservedSpace;
 
     // Skip the database header on the first page.
-    var offset = no == 1 ? 100 : 0;
+    var offset = this.no == 1 ? 100 : 0;
     this.type = data.getUint8(offset);
     this.leaf = (this.type & LEAF) > 0;
 
@@ -525,19 +563,16 @@ function BTreePage(buffer, no, db) {
     }
 
     if (this.type === TABLE_LEAF) {
-        this.minLocal = db.minLeaf;
-        this.maxLocal = db.maxLeaf;
+        this.minLocal = this.db.minLeaf;
+        this.maxLocal = this.db.maxLeaf;
     } else if (this.type !== TABLE_INTERIOR) {
-        this.minLocal = db.minLocal;
-        this.maxLocal = db.maxLocal;
+        this.minLocal = this.db.minLocal;
+        this.maxLocal = this.db.maxLocal;
     }
 
-    nonEnumerable(this, 'db', db);
     nonEnumerable(this, '_data', data);
     nonEnumerable(this, '_bytes', new Uint8Array(buffer));
-}
-
-
+};
 
 BTreePage.prototype.getCell = function(no) {
     if (no >= this.cells) return;
@@ -598,45 +633,58 @@ BTreePage.prototype.loadRecords = function(callback) {
         });
     });
 };
+var SQLite = exports;
+
 if (typeof process !== 'undefined' && typeof process.title !== 'undefined') {
     // node.js
     var IO = require('./io');
     var Page = require('./page');
-
-    require('util').inherits(Database, process.EventEmitter);
+    var nextTick = process.nextTick;
 } else {
-    // Browser
-    Database.prototype = Object.create(EventEmitter.prototype, {
-        constructor: {
-            value: Database,
-            enumerable: false,
-            writable: true,
-            configurable: true
-        }
+    var nextTick = window.setTimeout;
+}
+
+function makeEventEmitter(child) {
+    var EE = typeof EventEmitter !== 'undefined' ? EventEmitter : process.EventEmitter;
+    child.prototype = Object.create(EE.prototype, {
+        constructor: { value: child, enumerable: false, writable: true, configurable: true }
     });
 }
 
-exports.Database = Database;
+makeEventEmitter(Database);
+SQLite.Database = Database;
 function Database(file) {
+    this.opened = false;
     this.tables = {};
     this.views = {};
     this.indexes = {};
     this.triggers = {};
 
+    this._pageCache = {};
+    var db = this;
+
+    function stattedFile(err, stat) {
+        if (err) return db.emit('error', err);
+        db.stat = stat;
+        IO.open(file, openedFile);
+    }
+
+    function openedFile(err, fd) {
+        if (err) return db.emit('error', err);
+        db.fd = fd;
+        db._open();
+    }
+
     // Call in nextTick to allow attaching event handlers in the current tick.
-    var open = this._open.bind(this);
-    (typeof process !== 'undefined' ? process.nextTick : window.setTimeout)(function() {
-        IO.open(file, open);
+    nextTick(function() {
+        IO.stat(file, stattedFile);
     });
 }
 
 Database.HEADER = [0x53, 0x51, 0x4c, 0x69, 0x74, 0x65, 0x20, 0x66, 0x6f, 0x72, 0x6d, 0x61, 0x74, 0x20, 0x33, 0x00];
 
-Database.prototype._open = function(err, fd) {
-    if (err) return this.emit('error', err);
-
+Database.prototype._open = function() {
     var db = this;
-    db.fd = fd;
     IO.read(db.fd, 0, 100, function(err, buffer) {
         if (err) return db.emit('error', err);
 
@@ -679,26 +727,50 @@ Database.prototype._open = function(err, fd) {
 
         db._loadSchema(function(err) {
             if (err) db.emit('error', err);
-            else db.emit('open');
+            else {
+                db.opened = true;
+                db.emit('open');
+            }
         });
     });
 };
 
 Database.prototype._retrievePage = function(no, type, callback) {
-    var db = this;
-    IO.read(db.fd, (no - 1) * db.pageSize, db.pageSize, function(err, buffer) {
-        if (err) return callback.call(db, err);
-
-        if (type === Page.BTREE) {
-            var page = new Page.BTree(buffer, no, db);
-        } else if (type === Page.OVERFLOW) {
-            var page = new Page.Overflow(buffer, no, db);
+    if (this._pageCache[no] && this._pageCache[no].loaded) {
+        var page = this._pageCache[no];
+        if (page.error) {
+            return callback(page.error);
         } else {
-            return db.emit('error', new Error('Page type not yet implemented'));
+            return callback(null, page);
+        }
+    }
+
+    // Start loading the page
+    if (!this.pages[no]) {
+        if (type === Page.BTREE) {
+            var page = new Page.BTree(no, this);
+        } else if (type === Page.OVERFLOW) {
+            var page = new Page.Overflow(no, this);
+        } else {
+            return callback(new Error('Page type not yet implemented'));
         }
 
-        callback.call(db, null, page);
-    });
+        IO.read(this.fd, (no - 1) * this.pageSize, this.pageSize, function(err, buffer) {
+            if (err) {
+                page.error = err;
+                page.emit('error', err);
+            } else {
+                page.setBuffer(buffer);
+                page.loaded = true;
+                page.emit('load');
+            }
+        });
+
+        this._pageCache[no] = page;
+    }
+
+    this._pageCache[no].on('load', function() { callback(null, this); });
+    this._pageCache[no].on('error', function(err) { callback(err); });
 };
 
 // This function loads an *entire* table. Use with caution.
@@ -756,17 +828,27 @@ Database.prototype._scanIndexPage = function(page, args, callback) {
 
     var db = this;
     function scan(no) {
-        page.getCell(no).getRecord(function(err, fields, cell) {
+        page.getCell(no).getRecord(function gotCellRecord(err, fields, cell) {
             if (err) return callback(err);
 
             for (var i = 0; i < args.length; i++) {
                 if (fields[i] > args[i]) {
-                    // Continue with left page.
-                    return db._btreeSearch(cell.left, args, callback);
+                    if (cell.left) {
+                        // Continue with left page.
+                        return db._btreeSearch(cell.left, args, callback);
+                    } else {
+                        // We've reached the end of our search.
+                        return callback(null);
+                    }
                 } else if (fields[i] < args[i]) {
                     if (no + 1 >= page.cells) {
-                        // Continue with right page.
-                        return db._btreeSearch(page.right, args, callback);
+                        if (page.right) {
+                            // Continue with right page.
+                            return db._btreeSearch(page.right, args, callback);
+                        } else {
+                            // We've reached the end of our search.
+                            return callback(null);
+                        }
                     } else {
                         // Continue with next cell.
                         return scan(no + 1);
@@ -803,12 +885,23 @@ Database.prototype._scanTablePage = function(page, rowid, callback) {
             var cell = page.getCell(i);
             // Continue with left page.
             if (cell.key >= rowid) {
-                return this._btreeSearch(cell.left, rowid, callback);
+                if (cell.left) {
+                    // Continue with left page.
+                    return this._btreeSearch(cell.left, rowid, callback);
+                } else {
+                    // We've reached the end of our search.
+                    return callback(null);
+                }
             }
         }
 
-        // No left cell matched; continue with right page.
-        return this._btreeSearch(page.right, rowid, callback);
+        if (page.right) {
+            // No left cell matched; continue with right page.
+            return this._btreeSearch(page.right, rowid, callback);
+        } else {
+            // We've reached the end of our search.
+            return callback(null);
+        }
     }
 };
 
@@ -856,12 +949,15 @@ Database.prototype._tableSearch = function(options, args, callback) {
 Database.prototype.execute = function(plan, input, callback) {
     var db = this;
     var i = 0;
-    run(plan[i], input);
+    nextTick(function() { run(plan[i], input); });
 
     function next(err, result) {
         if (err) return callback(err);
-        if (plan[i + 1]) return run(plan[++i], result);
-        else callback(null, result);
+        if (typeof result === 'undefined') return callback(null, []);
+        if (!plan[i + 1]) return callback(null, result);
+
+        // Cut the stack.
+        nextTick(function() { run(plan[++i], result); });
     }
 
     function run(step, input) {
