@@ -8,4 +8,4 @@ build:
 		lib/page.js \
 		lib/sqlite.js \
 		lib/suffix.js \
-		> sqlite.js
+		> demo/sqlite.js

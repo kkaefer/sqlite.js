@@ -1,0 +1,67 @@
+<script src="http://ajax.googleapis.com/ajax/libs/jquery/1.7.1/jquery.min.js"></script>
+<script src="modestmaps.js"></script>
+<script src="sqlite.js"></script>
+<script src="mbtiles.js"></script>
+<script src="mbtiles-provider.js"></script>
+<script>
+
+function buildMetadataTable(info) {
+    var metadata = $('#metadata').empty();
+    metadata.append($('<h3>').text(info.name));
+    var list = $('<ul>');
+    if (info.description) list.append($('<li>').text('Description: ' + info.description));
+    if (info.version) list.append($('<li>').text('Version: ' + info.version));
+    if (info.bounds) list.append($('<li>').text('Bounds: ' + info.bounds.join(', ')));
+    if (info.center) list.append($('<li>').text('Center: ' + info.center.join(', ')));
+    if ('minzoom' in info) list.append($('<li>').text('Minimum zoom: ' + info.minzoom));
+    if ('maxzoom' in info) list.append($('<li>').text('Maximum zoom: ' + info.maxzoom));
+    metadata.append(list);
+}
+
+$(function() {
+    // var map;
+    function loadFile(file) {
+        $('#map').empty();
+        var mbtiles = new MBTiles(file, function(err) {
+            if (err) return alert(err.message);
+
+            buildMetadataTable(mbtiles.info);
+
+            map = new MM.Map('map',
+                new MM.Layer(new MBTilesProvider(mbtiles)),
+                new MM.Point(700, 500),
+                [
+                    new MM.DragHandler(),
+                    new MM.DoubleClickHandler(),
+                    new MM.MouseWheelHandler(),
+                ]);
+
+            var center = mbtiles.info.center;
+            map.setCenterZoom(new MM.Location(center[1], center[0]), center[2]);
+        });
+    }
+
+    $('#file').change(function(e) {
+        loadFile(e.target.files[0]);
+    });
+
+    $('#map').on('drop', function(e) {
+        loadFile(e.originalEvent.dataTransfer.files[0]);
+    });
+    $('#map').on('dragenter dragexit dragover', function(e) {
+        e.stopPropagation();
+        e.preventDefault();
+    });
+});
+
+</script>
+
+<form>
+    Select an MBTiles file: <input type="file" id="file">
+</form>
+
+<div id="metadata">
+</div>
+
+<div id="map" dropzone="copy" style="width:800px; height:600px; background:white; border:1px solid black"></div>
+
